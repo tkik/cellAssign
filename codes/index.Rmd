@@ -1,0 +1,10 @@
+---
+title: "Cell type assignment to methylation-based components - cellAssign Startpage"
+author: "Reka Toth"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+This repository contains the cellAssign application. An example workflow is described in [meth_cellAssign.html](meth_cellAssign.html)
