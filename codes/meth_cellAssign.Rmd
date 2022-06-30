@@ -1,0 +1,161 @@
+---
+title: "Cell type assignment to methylation-based components - cellAssign"
+author: "Reka Toth"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+editor_options:
+  chunk_output_type: console
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+
+```
+
+```{r}
+library(cellAssign)
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(annotatr)
+library(tibble)
+library(cowplot)
+library(fgsea)
+source("helper_functions.R")
+
+```
+
+
+# Prepare the datasets 
+
+## Promoter methylation 
+
+First, we need to load in a methylation dataset. It can be both array- and sequencing-based. Here we are using a mouse sequencing-based dataset, which was processed using the `methrix` package. 
+
+First, we identify the promoters in the genome and calculate the mean methylation value for all samples. The same can be achieved by using for example the `r #meth(object, type = "promoters", row.names = TRUE)` command from the `RnBeads` package. Here I show an example processing, the processed files are provided in the data folder. 
+
+```{r eval=F, message=FALSE, warning=FALSE}
+
+
+res <- readRDS( "../data/no_snps_methrix.RDS") # a methrix object, not provided
+
+promoters <- build_annotations("mm10", "mm10_genes_promoters")
+
+
+promoter_methylation <- methrix::get_region_summary(res, promoters)
+promoter_methylation$symbol <- promoters$symbol[promoter_methylation$rid]
+promoter_methylation <- as.data.frame(promoter_methylation)
+
+# filtersing for promoters overlapping with more than 1 CpG site and measured in most of the samples 
+promoter_methylation <- promoter_methylation %>% 
+   filter(n_overlap_CpGs>1) %>% 
+   filter(apply(., 1, function(x) sum(is.na(x)))<10) 
+
+# a data frame or a data table containing summarized methylation values for all promoters and all samples. Not provided. 
+saveRDS(promoter_methylation, file="../data/promoter_methylation.RDS") 
+
+```
+
+Then, the promoter methylation data is correlated with the methylation components. In this case, the methylation components, named as LMCs, were calculated with [`MeDeCom`](https://github.com/lutsik/MeDeCom). The method of deconvolution is described in this [paper](https://www.nature.com/articles/s41596-020-0369-6). 
+
+
+```{r, eval=F}
+promoter_methylation <- readRDS( file="../data/promoter_methylation.RDS")
+
+medecom.result <-  readRDS( file = "../data/poised_enhancers_new_samples.RDS") #results from the MeDeCom analysis
+
+# assessing the LMC proportions, using K and lamda values based on the optimization. For further details, see the above cited paper
+K_sel <- 4
+lambda_sel <- 0.0001
+proportions <- MeDeCom::getProportions(medecom.result, K=K_sel, lambda=lambda_sel)
+colnames(proportions) <-  colnames(res)
+  
+#calculating the correlation   
+promoter_methylation <- promoter_methylation %>%
+  "[<-"(paste0("LMC", 1:4), value = NA_real_) %>%
+   "[<-"(paste0("LMC", 1:4, "_p"), value = NA_real_)
+
+for (LMCs in paste0("LMC", 1:4)){
+  
+est <-lapply(1:nrow(promoter_methylation), function(x)
+  cor.test(proportions[LMCs,],  as.numeric(promoter_methylation[x,-c(1:5, which(colnames(promoter_methylation)=="symbol"), grep("LMC", colnames(promoter_methylation)))]), method = "pears"))
+promoter_methylation[,LMCs] <- unlist(lapply(est, function(x) x$estimate))
+promoter_methylation[,paste0(LMCs, "_p")] <- -log10(unlist(lapply(est, function(x) x$p.value)))
+
+}
+
+df <- df %>%
+   select(starts_with("LMC") | starts_with("symbol")) %>%
+    filter(!is.na(symbol))
+saveRDS(df, file="../data/control_correlation_LMCs.RDS") # data provided the the data folder. 
+
+```
+
+Single-cell markers were downloaded from the [CellMarker database](http://bio-bigdata.hrbmu.edu.cn/CellMarker/download/Single_cell_markers.txt). 
+In this case our samples are coming from mouse lung tissue, therefore we will use markers for those cell types. 
+
+```{r}
+Single_cell_markers <- read.delim2("../data/Single_cell_markers.txt")
+Single_cell_markers <- Single_cell_markers %>%
+  filter(speciesType=="Mouse" & tissueType=="Lung" & cancerType=="Normal")
+marker_list <- lapply(Single_cell_markers$geneSymbol, strsplit, split=", ")
+marker_list <- lapply(marker_list, unlist)
+names(marker_list) <- Single_cell_markers$cellName
+
+```
+
+For each LMC we can calculate enrichment scores using `fgsea`, using the correlation coefficients as ranks and the markers as gene sets. In a simplistic approach, promoter methylation is inversely correlated with gene expression, the LMC are assigned to those cell types with significant negative enrichment. 
+The results are visualized with plots based on the `gseaplot` function of the `enrichplot` package. The helper_functions.R script contains the modified version of this plot used below.
+
+
+```{r}
+
+df <- readRDS(file="../data/control_correlation_LMCs.RDS")
+
+LMC1_rank <-  df %>%
+  arrange(desc(abs(LMC1)),desc(LMC1_p)) %>%
+  mutate(symbol=replace(symbol, duplicated(symbol), NA))%>%
+  dplyr::filter(!is.na(symbol)) %>%
+  arrange(LMC1) %>%
+  select(c( symbol, LMC1)) %>%
+  tibble::deframe()
+
+
+fgseaRes <- fgsea(pathways = marker_list,
+                  stats    = LMC1_rank,
+                  minSize  = 3,
+                  maxSize  = 500, nperm=1000)
+
+LMC1_plot <- gseaplot2(geneSetID = c(which(fgseaRes$padj<0.05)),  base_size = 11, rel_heights = c(1.5, 0.8), subplots = c(1, 2, 3),  pvalue_table = FALSE, ES_geom = "line",
+          title = "LMC1 correlation", ranks = LMC1_rank, geneSet = marker_list, pvaluetable = fgseaRes)
+
+LMC1_plot
+
+```
+
+```{r}
+
+LMC2_rank <-  df %>%
+  arrange(desc(abs(LMC2)),desc(LMC2_p)) %>%
+  mutate(symbol=replace(symbol, duplicated(symbol), NA))%>%
+  dplyr::filter(!is.na(symbol)) %>%
+  arrange(LMC2) %>%
+  select(c( symbol, LMC2)) %>%
+  tibble::deframe()
+
+
+fgseaRes <- fgsea(pathways = marker_list,
+                  stats    = LMC2_rank,
+                  minSize  = 3,
+                  maxSize  = 500, nperm=1000)
+
+LMC2_plot <- gseaplot2(geneSetID = c(which(fgseaRes$padj<0.05)),  base_size = 11, rel_heights = c(1.5, 0.8), subplots = c(1, 2, 3),  pvalue_table = FALSE, ES_geom = "line",
+          title = "LMC2 correlation", ranks = LMC2_rank, geneSet = marker_list, pvaluetable = fgseaRes)
+
+LMC2_plot
+
+```
+
